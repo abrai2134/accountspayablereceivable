@@ -274,6 +274,12 @@ function openMark(bills, prefill) {
     </div>
     <label>UTR / cheque no. <input id="mkRef" autocomplete="off" placeholder="needed except for cash"></label>
     <label>Remarks <input id="mkRem" autocomplete="off"></label>
+    <div class="proof-pick">
+      <label>Payment proof <span class="req">required</span>
+        <small>Screenshot of the payment, photo of the cheque, or bank advice PDF</small>
+        <input type="file" id="mkProof" accept="image/*,application/pdf"></label>
+      <div id="mkPreview"></div>
+    </div>
     <div id="mkWarn"></div>
     <button class="btn primary" id="mkGo" style="width:100%">Save – mark ${word}</button>`);
   if (prefill) { $("#mkDate").value = prefill.paid_on; $("#mkMode").value = prefill.mode;
@@ -284,6 +290,10 @@ function openMark(bills, prefill) {
   };
   $$("[data-amt]", body).forEach((i) => i.addEventListener("input", () => { total(); resetConfirm(); }));
   ["#mkDate", "#mkMode", "#mkRef"].forEach((id) => $(id).addEventListener("input", resetConfirm));
+  $("#mkProof").addEventListener("change", () => { showPreview($("#mkProof").files[0], $("#mkPreview")); resetConfirm(); });
+  $("#mkMode").addEventListener("change", () => {
+    $(".proof-pick .req").textContent = $("#mkMode").value === "Adjustment" ? "optional" : "required";
+  });
   total();
 
   let confirm = false;
@@ -298,12 +308,20 @@ function openMark(bills, prefill) {
       paid_on: $("#mkDate").value, mode: $("#mkMode").value,
       reference: $("#mkRef").value.trim(), remarks: $("#mkRem").value.trim(), confirm,
     };
+    const file = $("#mkProof").files[0];
+    if (!file && payload.mode !== "Adjustment") {
+      toast("Attach the payment proof – screenshot, cheque photo or PDF.", 4000); return;
+    }
+    if (file && file.size > 10 * 1024 * 1024) { toast("Proof file is over 10 MB. Use a screenshot.", 4000); return; }
     if (confirm && $("#mkSure") && !$("#mkSure").checked) {
       toast("Tick the box to confirm you checked it."); return;
     }
     $("#mkGo").disabled = true;
     try {
-      const r = await api("/api/entries", { method: "POST", body: payload });
+      const form = new FormData();
+      form.append("data", JSON.stringify(payload));
+      if (file) form.append("proof", file);
+      const r = await api("/api/entries", { method: "POST", form });
       if (r._status === 409) {
         confirm = true;
         $("#mkWarn").innerHTML = r.warnings.map((w) =>
@@ -320,6 +338,26 @@ function openMark(bills, prefill) {
     } catch (e) { fail(e); }
     finally { $("#mkGo") && ($("#mkGo").disabled = false); }
   });
+}
+
+function showPreview(file, box) {
+  box.innerHTML = "";
+  if (!file) return;
+  if (file.type.startsWith("image/")) {
+    const img = document.createElement("img");
+    img.className = "proof-thumb"; img.alt = "proof";
+    img.src = URL.createObjectURL(file);
+    box.appendChild(img);
+  } else {
+    box.innerHTML = `<div class="proof-file">📄 ${esc(file.name)}</div>`;
+  }
+}
+
+function proofLink(e) {
+  const url = `/api/proofs/${e.proof_id}`;
+  return (e.proof_mime || "").startsWith("image/") && e.proof_mime !== "image/heic"
+    ? `<a href="${url}" target="_blank" rel="noopener"><img class="proof-thumb" src="${url}" alt="payment proof" loading="lazy"></a>`
+    : `<a class="proof-file" href="${url}" target="_blank" rel="noopener">📄 ${esc(e.proof_name || "View proof")}</a>`;
 }
 
 /* ============================================================ one bill */
@@ -360,7 +398,10 @@ async function openBill(id) {
           entered ${esc(e.created_at.slice(0, 16))} · ${e.reconciled_at ? "✔ seen in Tally" : "waiting for Tally"}
           ${e.flagged ? ' · <b style="color:var(--red)">flagged</b>' : ""}
           ${e.deleted_at ? `<br>removed by ${esc(e.deleted_by_name)}: ${esc(e.delete_reason)}` : ""}</small>
-        ${!e.deleted_at && (e.user_id === S.me.id || admin) ? `<div><button class="btn small danger" data-del="${e.id}">Remove</button></div>` : ""}
+        ${e.proof_id ? proofLink(e) : `<div class="noproof">No payment proof</div>`}
+        ${!e.deleted_at && (e.user_id === S.me.id || admin) ? `<div class="acts">
+          ${e.proof_id ? "" : `<label class="btn small">📎 Attach proof<input type="file" hidden accept="image/*,application/pdf" data-attach="${e.id}"></label>`}
+          <button class="btn small danger" data-del="${e.id}">Remove</button></div>` : ""}
       </div>`).join("") : `<p class="hint">Nobody has marked this yet.</p>`}
 
     <div class="sec">Follow-ups</div>
@@ -389,6 +430,13 @@ async function openBill(id) {
       body: { text: $("#nText").value, promise_date: $("#nDate").value } });
       toast("Follow-up saved."); openBill(b.id); } catch (e) { fail(e); }
   });
+  $$("[data-attach]", body).forEach((inp) => inp.addEventListener("change", async () => {
+    const f = inp.files[0]; if (!f) return;
+    const form = new FormData(); form.append("proof", f);
+    try { const r = await api(`/api/entries/${inp.dataset.attach}/proof`, { method: "POST", form });
+      toast(r.flagged ? "Proof added – it was used before, so it is flagged." : "Proof added. ✔"); openBill(b.id); }
+    catch (e) { fail(e); }
+  }));
   $$("[data-del]", body).forEach((btn) => btn.addEventListener("click", async () => {
     const reason = prompt("Why is this entry being removed? (everyone can see this)");
     if (!reason) return;

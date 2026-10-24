@@ -548,7 +548,8 @@ def check_entries(conn, user, lines, paid_on, reference):
     return warnings
 
 
-def save_entries(conn, user, lines, paid_on, mode, reference, remarks, warnings):
+def save_entries(conn, user, lines, paid_on, mode, reference, remarks, warnings,
+                 proof_id=None):
     batch = uuid.uuid4().hex[:10]
     alert_on = defaultdict(list)
     for w in warnings:
@@ -560,10 +561,10 @@ def save_entries(conn, user, lines, paid_on, mode, reference, remarks, warnings)
         flagged = 1 if alert_on.get(bill["id"]) else 0
         cur = conn.execute(
             "INSERT INTO entries (bill_id, user_id, amount, paid_on, mode, reference, "
-            "reference_key, remarks, batch, flagged, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "reference_key, remarks, batch, flagged, created_at, proof_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (bill["id"], user["id"], round(amount, 2), paid_on, mode, reference,
-             squeeze(reference), remarks, batch, flagged, stamp))
+             squeeze(reference), remarks, batch, flagged, stamp, proof_id))
         eid = cur.lastrowid
         saved.append(eid)
         for w in alert_on.get(bill["id"], []):
@@ -573,3 +574,19 @@ def save_entries(conn, user, lines, paid_on, mode, reference, remarks, warnings)
             f"{bill['party']} {bill['ref_no']}: {money(amount)} {mode} {reference}".strip(),
             bill["id"])
     return saved
+
+
+def proof_reuse(conn, file_hash):
+    """Has this exact screenshot / cheque photo been used for an earlier
+    payment?  One proof cannot back two payments."""
+    used = conn.execute(
+        "SELECT e.amount, e.paid_on, u.name, b.party, b.ref_no, b.kind FROM entries e "
+        "JOIN proofs p ON p.id = e.proof_id JOIN users u ON u.id = e.user_id "
+        "JOIN bills b ON b.id = e.bill_id WHERE p.file_hash = ? AND e.deleted_at = '' "
+        "ORDER BY e.id", (file_hash,)).fetchall()
+    if not used:
+        return None
+    u = used[0]
+    return (f"This same proof file was already uploaded by {u['name']} for {u['party']} "
+            f"({money(u['amount'])} {WORD[u['kind']]} on {u['paid_on']}, bill {u['ref_no']}). "
+            f"One payment proof cannot be used for two payments.")

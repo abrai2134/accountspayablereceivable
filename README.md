@@ -49,7 +49,12 @@ the **wellworth-accounts** service. It asks for `ACCOUNTS_ADMIN_USER` and
      so settled bills never come back by mistake.
 2. Each person opens **My work**, ticks the bills they paid / collected (tick
    the party name to pick all its bills), taps **Mark paid** / **Mark
-   received**, and enters the date, mode and **UTR / cheque no.**
+   received**, and enters the date, mode and **UTR / cheque no.**, and attaches
+   the **payment proof**: a screenshot of the payment, a photo of the cheque, or
+   the bank advice PDF (JPG / PNG / PDF, up to 10 MB). On a phone this opens the
+   camera or gallery. One proof covers all the bills paid together. Only an
+   *Adjustment* can be saved without one; a proof forgotten there can be added
+   later with **📎 Attach proof** on the bill.
 3. For receivables, **Add follow-up** on a bill to log a call ("promised by
    Friday"). Follow-ups count on the scoreboard too.
 
@@ -91,6 +96,7 @@ the person's name and time, and can be downloaded as CSV.
 | Tally already shows it settled | the bill dropped out of today's file |
 | Amount is more than what is pending | ₹99,999 against a ₹15,000 bill |
 | Same UTR / cheque already used for a **different** party | one UTR cannot pay two vendors |
+| The **same proof file** was already uploaded for another payment | one screenshot reused for two payments |
 | Same party, same amount, same day already marked on another bill | the same payment entered against two bills |
 | Someone already marked part of it | to make sure this is the balance |
 | The bill is given to someone else | they will get the credit |
@@ -118,8 +124,8 @@ and why. Once Tally shows the payment, only an admin can remove it.
 
 ## Where the data lives
 
-`instance/accounts.db` (SQLite), separate from the quotation app. Back up
-this one file. **More → Download** gives CSVs of all entries and bills.
+`instance/accounts.db` (SQLite) and the proof files in `instance/proofs/`.
+Back up the whole `instance` folder. **More → Download** gives CSVs of all entries and bills.
 
 ## Tests
 

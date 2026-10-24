@@ -4,6 +4,7 @@
 """
 
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -20,6 +21,11 @@ from accounts.db import get_db  # noqa: E402
 from accounts.main import create_app, create_user  # noqa: E402
 
 H = {"X-Requested-With": "accounts-desk"}
+
+
+def png(tag):
+    """A stand-in screenshot: PNG header plus something unique."""
+    return b"\x89PNG\r\n\x1a\n" + tag.encode() + b"\x00" * 64
 
 
 def tally_file(firm, report, bills):
@@ -82,11 +88,16 @@ class AccountsDeskTest(unittest.TestCase):
         conn.close()
         return dict(b), st
 
-    def mark(self, c, refs_amounts, ref="UTR1", confirm=False, paid_on="2026-10-23"):
+    def mark(self, c, refs_amounts, ref="UTR1", confirm=False, paid_on="2026-10-23",
+             proof=None, mode="NEFT"):
         lines = [{"bill_id": self.bill(r)[0]["id"], "amount": a} for r, a in refs_amounts]
-        return c.post("/api/entries", headers=H, json={
-            "lines": lines, "paid_on": paid_on, "mode": "NEFT", "reference": ref,
-            "confirm": confirm})
+        form = {"data": json.dumps({"lines": lines, "paid_on": paid_on, "mode": mode,
+                                    "reference": ref, "confirm": confirm})}
+        if proof is None:
+            proof = png(ref)            # a different screenshot for every payment
+        if proof:
+            form["proof"] = (io.BytesIO(proof), "payment.png")
+        return c.post("/api/entries", headers=H, data=form, content_type="multipart/form-data")
 
     def test_flow(self):
         admin = self.client("abrar", "adminpass1")
@@ -148,9 +159,39 @@ class AccountsDeskTest(unittest.TestCase):
         self.assertIn("over_amount", {w["kind"] for w in r.get_json()["warnings"]})
 
         # ---- no UTR, not cash -> refused
-        r = c_owner.post("/api/entries", headers=H, json={
-            "lines": [{"bill_id": self.bill("P-9")[0]["id"], "amount": 100}], "mode": "NEFT"})
+        r = self.mark(c_owner, [("P-9", 100)], ref="")
         self.assertEqual(r.status_code, 400)
+
+        # ---- no proof -> refused; a .txt pretending to be a proof -> refused
+        r = self.mark(c_owner, [("S-1", 100)], ref="UTR-S", proof=b"")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("proof", r.get_json()["error"])
+        r = self.mark(c_owner, [("S-1", 100)], ref="UTR-S", proof=b"hello, not a picture")
+        self.assertEqual(r.status_code, 400)
+
+        # ---- the same screenshot used for a second payment is caught
+        r = self.mark(c_owner, [("T-1", 1000)], ref="UTR-T", proof=png("UTR-JJ-1"))
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("proof_reused", {w["kind"] for w in r.get_json()["warnings"]})
+
+        # ---- the proof can be opened by anyone signed in
+        pid = get_db().execute("SELECT proof_id FROM entries WHERE reference = 'UTR-JJ-1'"
+                               ).fetchone()["proof_id"]
+        self.assertIsNotNone(pid, "both JJ bills share the one proof")
+        r = c_other.get(f"/api/proofs/{pid}")
+        self.assertEqual((r.status_code, r.mimetype), (200, "image/png"))
+        self.assertIn("sandbox", r.headers["Content-Security-Policy"])
+        r.close()
+
+        # ---- an adjustment needs no proof, and one can be attached later
+        r = self.mark(c_owner, [("S-1", 50)], ref="", proof=b"", mode="Adjustment", confirm=True)
+        self.assertEqual(r.status_code, 200, r.get_json())
+        eid = r.get_json()["entries"][0]
+        r = c_owner.post(f"/api/entries/{eid}/proof", headers=H, content_type="multipart/form-data",
+                         data={"proof": (io.BytesIO(png("late")), "late.png")})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertIsNotNone(get_db().execute("SELECT proof_id FROM entries WHERE id = ?",
+                                              (eid,)).fetchone()["proof_id"])
 
         # ---- part payment on PARAS by its owner
         paras, _ = self.bill("P-9")
@@ -192,7 +233,7 @@ class AccountsDeskTest(unittest.TestCase):
         # ---- scoreboard credits the person who marked
         s = admin.get("/api/scoreboard?period=all").get_json()
         by = {p["name"].lower(): p for p in s["people"]}
-        self.assertEqual(by[owner]["payable"]["amount"], 80000)
+        self.assertEqual(by[owner]["payable"]["amount"], 80050, "80,000 JJ + 50 adjustment")
         self.assertEqual(by[other]["payable"]["flagged"], 1)
 
         # ---- only the maker or an admin can remove an entry

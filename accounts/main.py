@@ -7,6 +7,7 @@ or receipt marked here carries the name of whoever did it.
 """
 
 import csv
+import hashlib
 import hmac
 import io
 import json
@@ -16,12 +17,12 @@ import time
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 
-from flask import Flask, Response, jsonify, redirect, request, session
+from flask import Flask, Response, jsonify, redirect, request, send_file, session
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from . import logic
-from .db import INSTANCE_DIR, KINDS, get_db, init_db, log, now, squeeze, today
+from .db import INSTANCE_DIR, KINDS, PROOF_DIR, get_db, init_db, log, now, squeeze, today
 from .tally import TallyFileError
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -33,7 +34,7 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=os.environ.get("ACCOUNTS_HTTPS", "") == "1",
-    MAX_CONTENT_LENGTH=20 * 1024 * 1024,
+    MAX_CONTENT_LENGTH=25 * 1024 * 1024,
 )
 
 MODES = ["NEFT", "RTGS", "IMPS", "UPI", "Cheque", "Cash", "Adjustment", "Other"]
@@ -558,8 +559,10 @@ def read_bill(bid):
     out = dict(bill)
     out.update(logic.bill_state(conn, [bid])[bid])
     out["entries"] = rows(conn.execute(
-        "SELECT e.*, u.name AS by_name, d.name AS deleted_by_name FROM entries e "
+        "SELECT e.*, u.name AS by_name, d.name AS deleted_by_name, p.mime AS proof_mime, "
+        "p.file_name AS proof_name FROM entries e "
         "JOIN users u ON u.id = e.user_id LEFT JOIN users d ON d.id = e.deleted_by "
+        "LEFT JOIN proofs p ON p.id = e.proof_id "
         "WHERE e.bill_id = ? ORDER BY e.id", (bid,)))
     out["notes"] = rows(conn.execute(
         "SELECT n.*, u.name AS by_name FROM notes n JOIN users u ON u.id = n.user_id "
@@ -642,9 +645,124 @@ def _valid_day(text):
         return ""
 
 
+# ================================================================ payment proof
+
+PROOF_MAX = 10 * 1024 * 1024
+# Only these are kept, recognised by their first bytes rather than their name.
+PROOF_TYPES = [
+    (b"\xff\xd8\xff", "image/jpeg", ".jpg"),
+    (b"\x89PNG\r\n\x1a\n", "image/png", ".png"),
+    (b"%PDF", "application/pdf", ".pdf"),
+    (b"GIF8", "image/gif", ".gif"),
+]
+# Modes where there is nothing to show.
+NO_PROOF_MODES = ("Adjustment",)
+
+
+def proof_kind(data):
+    for magic, mime, ext in PROOF_TYPES:
+        if data.startswith(magic):
+            return mime, ext
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp", ".webp"
+    if data[4:8] == b"ftyp" and data[8:12] in (b"heic", b"heix", b"mif1", b"msf1", b"hevc"):
+        return "image/heic", ".heic"
+    return None, None
+
+
+def read_proof(upload):
+    """-> (bytes, mime, ext, sha256) or raise ValueError with a plain message."""
+    if upload is None or not upload.filename:
+        return None
+    data = upload.read(PROOF_MAX + 1)
+    if len(data) > PROOF_MAX:
+        raise ValueError("The proof file is bigger than 10 MB. Send a screenshot instead.")
+    if not data:
+        raise ValueError("The proof file is empty.")
+    mime, ext = proof_kind(data)
+    if not mime:
+        raise ValueError("Proof must be a photo, a screenshot (JPG / PNG) or a PDF.")
+    return data, mime, ext, hashlib.sha256(data).hexdigest()
+
+
+def store_proof(conn, proof, file_name, user_id):
+    data, mime, ext, digest = proof
+    os.makedirs(PROOF_DIR, exist_ok=True)
+    stored = secrets.token_hex(16) + ext
+    with open(os.path.join(PROOF_DIR, stored), "wb") as fh:
+        fh.write(data)
+    cur = conn.execute(
+        "INSERT INTO proofs (file_hash, file_name, stored_name, mime, size, user_id, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (digest, (file_name or "proof")[:120], stored, mime, len(data), user_id, now()))
+    return cur.lastrowid, stored
+
+
+@app.get("/api/proofs/<int:pid>")
+def show_proof(pid):
+    conn = get_db()
+    p = conn.execute("SELECT * FROM proofs WHERE id = ?", (pid,)).fetchone()
+    conn.close()
+    path = os.path.join(PROOF_DIR, p["stored_name"]) if p else ""
+    if not p or not os.path.exists(path):
+        return {"error": "Proof file not found."}, 404
+    resp = send_file(path, mimetype=p["mime"], download_name=p["file_name"],
+                     as_attachment=request.args.get("download") == "1")
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Content-Security-Policy"] = "sandbox; default-src 'none'; img-src 'self'; style-src 'unsafe-inline'"
+    resp.headers["Cache-Control"] = "private, max-age=86400"
+    return resp
+
+
+@app.post("/api/entries/<int:eid>/proof")
+def attach_proof(eid):
+    """Add the proof later to an entry saved without one."""
+    try:
+        proof = read_proof(request.files.get("proof"))
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+    if not proof:
+        return {"error": "Choose the proof file."}, 400
+    conn = get_db()
+    e = conn.execute("SELECT e.*, b.party, b.ref_no FROM entries e JOIN bills b ON "
+                     "b.id = e.bill_id WHERE e.id = ? AND e.deleted_at = ''", (eid,)).fetchone()
+    if not e:
+        conn.close()
+        return {"error": "No such entry."}, 404
+    if e["user_id"] != request.user["id"] and request.user["role"] != "admin":
+        conn.close()
+        return {"error": "Only the person who made the entry, or an admin, can add its proof."}, 403
+    reused = logic.proof_reuse(conn, proof[3])
+    pid, _ = store_proof(conn, proof, request.files["proof"].filename, request.user["id"])
+    # one upload covers every bill paid in the same go
+    conn.execute("UPDATE entries SET proof_id = ? WHERE batch = ? AND proof_id IS NULL "
+                 "AND deleted_at = ''", (pid, e["batch"]))
+    if reused:
+        conn.execute("UPDATE entries SET flagged = 1 WHERE batch = ?", (e["batch"],))
+        logic.raise_alert(conn, "proof_reused", f"Added by {request.user['name']}: {reused}",
+                          bill_id=e["bill_id"], entry_id=eid, raised_by=request.user["id"],
+                          once=False)
+    log(conn, request.user["id"], "proof_added", f"{e['party']} {e['ref_no']}: proof added",
+        e["bill_id"])
+    conn.commit()
+    conn.close()
+    return {"ok": True, "flagged": bool(reused)}
+
+
 @app.post("/api/entries")
 def add_entries():
-    d = body()
+    # Sent as a form when a proof file comes with it, plain JSON otherwise.
+    if request.files or request.form.get("data"):
+        try:
+            d = json.loads(request.form.get("data") or "{}")
+        except ValueError:
+            return {"error": "Bad request."}, 400
+    else:
+        d = body()
+    try:
+        proof = read_proof(request.files.get("proof"))
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
     lines_in = d.get("lines") or []
     paid_on = _valid_day(d.get("paid_on")) or today()
     if paid_on > today():
@@ -657,6 +775,9 @@ def add_entries():
     if mode not in ("Cash", "Adjustment") and not reference:
         return {"error": "Enter the UTR / cheque number, so a second payment of the same "
                          "bill can be caught."}, 400
+    if not proof and mode not in NO_PROOF_MODES:
+        return {"error": "Attach the payment proof: a screenshot of the payment, a photo of "
+                         "the cheque, or the bank advice PDF."}, 400
 
     conn = get_db()
     try:
@@ -683,6 +804,11 @@ def add_entries():
             return {"error": "Mark one party at a time."}, 400
 
         warnings = logic.check_entries(conn, request.user, lines, paid_on, reference)
+        if proof:
+            reused = logic.proof_reuse(conn, proof[3])
+            if reused:
+                warnings.append({"bill_id": lines[0][0]["id"], "kind": "proof_reused",
+                                 "alert": True, "message": reused})
         if any(w.get("block") for w in warnings):
             conn.rollback()
             return {"error": " ".join(w["message"] for w in warnings if w.get("block"))}, 400
@@ -690,9 +816,16 @@ def add_entries():
         if warnings and not d.get("confirm"):
             conn.rollback()
             return {"needs_confirm": True, "warnings": warnings, "serious": bool(serious)}, 409
+        proof_id, stored = (store_proof(conn, proof, request.files["proof"].filename,
+                                        request.user["id"]) if proof else (None, None))
         ids = logic.save_entries(conn, request.user, lines, paid_on, mode, reference,
-                                 remarks, warnings)
-        conn.commit()
+                                 remarks, warnings, proof_id)
+        try:
+            conn.commit()
+        except Exception:
+            if stored:          # do not leave an orphan file behind
+                os.remove(os.path.join(PROOF_DIR, stored))
+            raise
     finally:
         conn.close()
     return {"ok": True, "entries": ids, "flagged": bool(serious)}
@@ -865,7 +998,8 @@ def export_entries():
     data = [list(r) for r in conn.execute(
         "SELECT e.paid_on, f.code, b.kind, b.party, b.ref_no, b.bill_date, e.amount, e.mode, "
         "e.reference, u.name, e.remarks, e.created_at, CASE WHEN e.flagged THEN 'YES' ELSE '' END, "
-        "CASE WHEN e.reconciled_at != '' THEN 'YES' ELSE '' END, e.deleted_at, e.delete_reason "
+        "CASE WHEN e.reconciled_at != '' THEN 'YES' ELSE '' END, "
+        "CASE WHEN e.proof_id IS NOT NULL THEN 'YES' ELSE 'NO' END, e.deleted_at, e.delete_reason "
         "FROM entries e JOIN bills b ON b.id = e.bill_id JOIN firms f ON f.id = b.firm_id "
         "JOIN users u ON u.id = e.user_id WHERE e.paid_on BETWEEN ? AND ? ORDER BY e.paid_on, e.id",
         (start, end))]
@@ -873,7 +1007,8 @@ def export_entries():
     return csv_response(f"entries_{start}_to_{end}.csv",
                         ["Paid/received on", "Firm", "Type", "Party", "Bill no", "Bill date",
                          "Amount", "Mode", "UTR / cheque", "Done by", "Remarks", "Entered at",
-                         "Flagged", "Seen in Tally", "Removed at", "Removed because"], data)
+                         "Flagged", "Seen in Tally", "Proof attached", "Removed at",
+                         "Removed because"], data)
 
 
 @app.get("/api/export/bills.csv")

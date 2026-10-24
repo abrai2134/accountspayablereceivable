@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INSTANCE_DIR = os.environ.get("ACCOUNTS_INSTANCE", os.path.join(BASE_DIR, "instance"))
 DB_PATH = os.environ.get("ACCOUNTS_DB", os.path.join(INSTANCE_DIR, "accounts.db"))
+PROOF_DIR = os.path.join(INSTANCE_DIR, "proofs")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -105,7 +106,8 @@ CREATE TABLE IF NOT EXISTS entries (
     created_at    TEXT NOT NULL,
     deleted_at    TEXT NOT NULL DEFAULT '',
     deleted_by    INTEGER REFERENCES users(id),
-    delete_reason TEXT NOT NULL DEFAULT ''
+    delete_reason TEXT NOT NULL DEFAULT '',
+    proof_id      INTEGER REFERENCES proofs(id)
 );
 CREATE INDEX IF NOT EXISTS idx_entries_bill ON entries(bill_id);
 CREATE INDEX IF NOT EXISTS idx_entries_user ON entries(user_id);
@@ -138,6 +140,19 @@ CREATE TABLE IF NOT EXISTS alerts (
     resolve_note TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_bill ON alerts(bill_id);
+
+-- Payment proof: a screenshot, a photo of the cheque, or a PDF advice.
+CREATE TABLE IF NOT EXISTS proofs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_hash   TEXT NOT NULL,           -- the same file uploaded twice is caught
+    file_name   TEXT NOT NULL,
+    stored_name TEXT NOT NULL,           -- under instance/proofs/
+    mime        TEXT NOT NULL,
+    size        INTEGER NOT NULL,
+    user_id     INTEGER NOT NULL REFERENCES users(id),
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_proofs_hash ON proofs(file_hash);
 
 CREATE TABLE IF NOT EXISTS activity (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -202,9 +217,20 @@ def get_db():
     return conn
 
 
+# Columns added after the first release, applied to databases made before.
+ADDED_COLUMNS = {
+    "entries": [("proof_id", "INTEGER REFERENCES proofs(id)")],
+}
+
+
 def init_db():
     conn = get_db()
     conn.executescript(SCHEMA)
+    for table, columns in ADDED_COLUMNS.items():
+        have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, spec in columns:
+            if name not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {spec}")
     if conn.execute("SELECT COUNT(*) FROM firms").fetchone()[0] == 0:
         conn.executemany("INSERT INTO firms (code, name, aliases) VALUES (?, ?, ?)",
                          DEFAULT_FIRMS)
