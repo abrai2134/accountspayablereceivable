@@ -6,7 +6,8 @@ services:
     runtime: python
     plan: starter            # needs the disk, or every payment marked is lost on restart
     buildCommand: pip install -r requirements.txt
-    startCommand: python -m accounts.main
+    # one worker: logins and the database live on this one machine
+    startCommand: gunicorn -w 1 --threads 8 --timeout 120 -b 0.0.0.0:$PORT "accounts.main:create_app()"
     healthCheckPath: /health
     envVars:
       - key: ACCOUNTS_ADMIN_USER
