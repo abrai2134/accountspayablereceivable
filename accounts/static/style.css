@@ -211,3 +211,10 @@ body.admin .admin-only { display: block; }
 .noproof { font-size: 12px; color: var(--amber); margin-top: 4px; }
 .entry .acts { display: flex; gap: 8px; margin-top: 6px; }
 .entry .acts label.btn { margin: 0; color: var(--text); }
+.paste-zone { margin: 0 0 10px; padding: 14px 12px; border: 2px dashed #b9cbbf; border-radius: 9px;
+              background: #fff; font-size: 13px; color: var(--muted); text-align: center; cursor: text;
+              line-height: 1.45; caret-color: transparent; }
+.paste-zone:focus { outline: none; border-color: var(--brand-2); background: var(--green-bg); color: var(--text); }
+.paste-zone.over { border-color: var(--brand-2); background: var(--green-bg); }
+.paste-zone.has { border-style: solid; border-color: var(--brand-2); }
+.proof-name { font-size: 12.5px; color: var(--green); font-weight: 600; margin: -2px 0 8px; }

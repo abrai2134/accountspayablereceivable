@@ -51,8 +51,10 @@ the **wellworth-accounts** service. It asks for `ACCOUNTS_ADMIN_USER` and
    the party name to pick all its bills), taps **Mark paid** / **Mark
    received**, and enters the date, mode and **UTR / cheque no.**, and attaches
    the **payment proof**: a screenshot of the payment, a photo of the cheque, or
-   the bank advice PDF (JPG / PNG / PDF, up to 10 MB). On a phone this opens the
-   camera or gallery. One proof covers all the bills paid together. Only an
+   the bank advice PDF (JPG / PNG / PDF, up to 10 MB). Choose the file, or
+   **paste** it: copy the picture (WhatsApp / Telegram: *Copy*, or a screenshot
+   with Win+Shift+S), click the paste box and press **Ctrl+V**. Dragging the
+   picture in works too. On a phone, Choose File opens the camera or gallery. One proof covers all the bills paid together. Only an
    *Adjustment* can be saved without one; a proof forgotten there can be added
    later with **📎 Attach proof** on the bill.
 3. For receivables, **Add follow-up** on a bill to log a call ("promised by

@@ -278,6 +278,10 @@ function openMark(bills, prefill) {
       <label>Payment proof <span class="req">required</span>
         <small>Screenshot of the payment, photo of the cheque, or bank advice PDF</small>
         <input type="file" id="mkProof" accept="image/*,application/pdf"></label>
+      <div class="paste-zone" id="mkPaste" contenteditable="true" spellcheck="false"
+           aria-label="Paste or drop the payment screenshot here">
+        📋 <b>Paste a screenshot here</b> – copy the image (WhatsApp / Telegram: <i>Copy</i>),
+        then click here and press <b>Ctrl+V</b>. Or drag the picture in.</div>
       <div id="mkPreview"></div>
     </div>
     <div id="mkWarn"></div>
@@ -290,7 +294,45 @@ function openMark(bills, prefill) {
   };
   $$("[data-amt]", body).forEach((i) => i.addEventListener("input", () => { total(); resetConfirm(); }));
   ["#mkDate", "#mkMode", "#mkRef"].forEach((id) => $(id).addEventListener("input", resetConfirm));
-  $("#mkProof").addEventListener("change", () => { showPreview($("#mkProof").files[0], $("#mkPreview")); resetConfirm(); });
+  let proofFile = null;
+  const setProof = (f) => {
+    proofFile = f || null;
+    showPreview(proofFile, $("#mkPreview"));
+    $("#mkPaste").classList.toggle("has", !!proofFile);
+    resetConfirm();
+  };
+  $("#mkProof").addEventListener("change", () => setProof($("#mkProof").files[0]));
+  // A copied picture can be pasted anywhere in the form, the box just makes it obvious.
+  const fromClipboard = (e) => {
+    const f = pickImage(e.clipboardData);
+    if (!f) return false;
+    e.preventDefault();
+    $("#mkProof").value = "";
+    setProof(f);
+    toast("Screenshot attached. ✔");
+    return true;
+  };
+  body.addEventListener("paste", (e) => {
+    if (!fromClipboard(e) && e.target.id === "mkPaste") {
+      e.preventDefault();
+      toast("Nothing to paste – copy the image first (not the chat text).", 3500);
+    }
+  });
+  const zone = $("#mkPaste");
+  zone.addEventListener("beforeinput", (e) => e.preventDefault());   // only pictures go in
+  zone.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey) && e.key.length === 1) e.preventDefault();
+  });
+  ["dragenter", "dragover"].forEach((t) => zone.addEventListener(t, (e) => {
+    e.preventDefault(); zone.classList.add("over");
+  }));
+  ["dragleave", "drop"].forEach((t) => zone.addEventListener(t, () => zone.classList.remove("over")));
+  zone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    const f = pickImage(e.dataTransfer);
+    if (f) { $("#mkProof").value = ""; setProof(f); }
+    else toast("Drop a picture or a PDF.");
+  });
   $("#mkMode").addEventListener("change", () => {
     $(".proof-pick .req").textContent = $("#mkMode").value === "Adjustment" ? "optional" : "required";
   });
@@ -308,7 +350,7 @@ function openMark(bills, prefill) {
       paid_on: $("#mkDate").value, mode: $("#mkMode").value,
       reference: $("#mkRef").value.trim(), remarks: $("#mkRem").value.trim(), confirm,
     };
-    const file = $("#mkProof").files[0];
+    const file = proofFile;
     if (!file && payload.mode !== "Adjustment") {
       toast("Attach the payment proof – screenshot, cheque photo or PDF.", 4000); return;
     }
@@ -340,6 +382,21 @@ function openMark(bills, prefill) {
   });
 }
 
+/* The image (or PDF) out of a paste or a drop, named so it is recognisable. */
+function pickImage(dt) {
+  if (!dt) return null;
+  const items = [...(dt.files || [])];
+  for (const it of dt.items || []) {
+    if (it.kind === "file") { const f = it.getAsFile(); if (f) items.push(f); }
+  }
+  const f = items.find((x) => x.type.startsWith("image/") || x.type === "application/pdf");
+  if (!f) return null;
+  if (f.name && f.name !== "image.png") return f;
+  const ext = (f.type.split("/")[1] || "png").replace("jpeg", "jpg");
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+  return new File([f], `pasted-${stamp}.${ext}`, { type: f.type });
+}
+
 function showPreview(file, box) {
   box.innerHTML = "";
   if (!file) return;
@@ -348,6 +405,7 @@ function showPreview(file, box) {
     img.className = "proof-thumb"; img.alt = "proof";
     img.src = URL.createObjectURL(file);
     box.appendChild(img);
+    box.insertAdjacentHTML("beforeend", `<div class="proof-name">✔ Attached: ${esc(file.name)}</div>`);
   } else {
     box.innerHTML = `<div class="proof-file">📄 ${esc(file.name)}</div>`;
   }
