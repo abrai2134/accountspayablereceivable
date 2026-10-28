@@ -68,7 +68,14 @@ the **wellworth-accounts** service. It asks for `ACCOUNTS_ADMIN_USER` and
   same rupee value**. (One very large party, like J.J. Engineering Works at
   ₹30 lakh, stays whole with one person, and that person gets fewer other
   parties.)
-- Admin can **give a party to someone else** from the bill screen, or press
+- Anyone can **pass a party on** with **↪ Pass on to someone else** on the
+  bill: when they cannot get the payment, do not know the client, or have too
+  much on. They pick a person (the list shows who has handled that party
+  before) or let the app choose, and give a reason. All that party's open
+  bills move together; the new person sees *"passed on by … : reason"* on
+  their list, and the scoreboard counts **passed on** and **taken over**.
+  Payments already marked stay credited to whoever marked them.
+- Admin can pass on any party, or press
   **More → Share out again** to rebalance everything. A party where someone has
   already marked a payment stays with them.
 - Switching a person off (or untick **Gets bills**) hands their open bills to

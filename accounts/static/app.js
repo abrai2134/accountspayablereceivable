@@ -179,7 +179,8 @@ function renderBills(data) {
       <div class="party-head">
         ${markable.length ? `<input type="checkbox" data-party="${esc(f.firm_id + "|" + f.party_key)}" title="Pick all bills of this party">` : ""}
         <div class="name"><b>${esc(f.party)}</b>
-          <small>${esc(f.firm)} · ${g.length} bill${g.length > 1 ? "s" : ""} · given to ${esc(f.assigned_name || "nobody")}</small></div>
+          <small>${esc(f.firm)} · ${g.length} bill${g.length > 1 ? "s" : ""} · given to ${esc(f.assigned_name || "nobody")}</small>
+          ${f.passed_from ? `<small class="passed">↪ passed on by ${esc(f.passed_from.split("|")[0])}: ${esc(f.passed_from.split("|").slice(1).join("|"))}</small>` : ""}</div>
         <div class="amt">${rs(total)}</div>
       </div>
       ${g.map(billRow).join("")}
@@ -440,9 +441,13 @@ async function openBill(id) {
     </div>
     <div class="row2">
       ${can ? `<button class="btn primary" id="bMark">Mark ${word}</button>` : `<button class="btn" id="bMark">Add a late entry</button>`}
-      ${admin ? `<select id="bWho"><option value="">Give this party to…</option>${S.users.filter((u) => u.active)
-        .map((u) => `<option value="${u.id}">${esc(u.name)}</option>`).join("")}</select>` : ""}
+      ${!b.cleared_at && (b.assigned_to === S.me.id || admin)
+        ? `<button class="btn" id="bPass">↪ Pass on to someone else</button>` : ""}
     </div>
+    ${b.handovers.length ? `<div class="sec">Passed on</div>` + b.handovers.map((h) => `
+      <div class="entry"><div class="top"><b>${esc(h.from_name || "nobody")} → ${esc(h.to_name)}</b>
+        <span>${esc(h.created_at.slice(0, 16))}</span></div>${esc(h.reason)}
+        <small>${h.bills} bill(s)${h.by_user !== h.from_user ? ` · by ${esc(h.by_name)}` : ""}</small></div>`).join("") : ""}
 
     ${b.alerts.length ? `<div class="sec">Alerts</div>` + b.alerts.map((a) => `
       <div class="warn-box ${a.resolved_at ? "note" : "high"}">${esc(a.message)}
@@ -476,13 +481,7 @@ async function openBill(id) {
   `);
 
   $("#bMark").addEventListener("click", () => openMark([b]));
-  if ($("#bWho")) $("#bWho").addEventListener("change", async () => {
-    const uid = $("#bWho").value; if (!uid) return;
-    const name = $("#bWho").selectedOptions[0].textContent;
-    if (!confirm(`Give all open ${b.kind} bills of ${b.party} to ${name}?`)) return;
-    try { const r = await api(`/api/bills/${b.id}/reassign`, { method: "POST", body: { user_id: +uid } });
-      toast(`${r.moved} bill(s) given to ${name}.`); closeModal(); loadBills(); } catch (e) { fail(e); }
-  });
+  if ($("#bPass")) $("#bPass").addEventListener("click", () => openPass(b));
   $("#nGo").addEventListener("click", async () => {
     try { await api(`/api/bills/${b.id}/notes`, { method: "POST",
       body: { text: $("#nText").value, promise_date: $("#nDate").value } });
@@ -503,6 +502,48 @@ async function openBill(id) {
   }));
 }
 
+/* ============================================================ passing work on */
+
+const PASS_REASONS = {
+  receivable: ["Not able to get the payment", "Don't know this client / no history",
+               "Client wants to talk to someone else", "Too much work right now"],
+  payable: ["Don't know this vendor / no history", "Need someone with bank access",
+            "Vendor dispute – needs someone senior", "Too much work right now"],
+};
+
+function openPass(b) {
+  const others = S.users.filter((u) => u.active && u.id !== b.assigned_to);
+  const know = b.know_how || {};
+  const sorted = [...others].sort((x, y) =>
+    (know[y.id] || 0) - (know[x.id] || 0) || y.takes_work - x.takes_work || x.name.localeCompare(y.name));
+  const body = openModal(`Pass on – ${b.party}`, `
+    <p class="hint">All <b>${b.same_party_open}</b> open ${b.kind === "payable" ? "payable" : "receivable"} bill(s) of
+      this party (${esc(b.firm)}) move to the person you pick. The reason is shown to them and to everyone.</p>
+    <div class="sec">Give it to</div>
+    <label class="check pass-opt"><input type="radio" name="pTo" value="auto" checked>
+      <span><b>Let the app choose</b><small>whoever has dealt with this party before, otherwise whoever has the least work</small></span></label>
+    ${sorted.map((u) => `<label class="check pass-opt"><input type="radio" name="pTo" value="${u.id}">
+      <span><b>${esc(u.name)}</b><small>${know[u.id] ? `✔ has handled this party before (${know[u.id]} time${know[u.id] > 1 ? "s" : ""})` : "has not handled this party yet"}${u.takes_work ? "" : " · does not normally get bills"}</small></span></label>`).join("")}
+    <div class="sec">Why</div>
+    ${PASS_REASONS[b.kind].map((r, i) => `<label class="check pass-opt"><input type="radio" name="pWhy" value="${esc(r)}" ${i === 0 ? "checked" : ""}><span>${esc(r)}</span></label>`).join("")}
+    <label class="check pass-opt"><input type="radio" name="pWhy" value=""><span>Other</span></label>
+    <label>Details for the next person <textarea id="pMore" rows="2" placeholder="${b.kind === "receivable"
+      ? "e.g. Called 3 times, accounts person Mr. Shah says cheque next week" : "e.g. Waiting for their revised bill"}"></textarea></label>
+    <button class="btn primary" id="pGo" style="width:100%">Pass on</button>`);
+  $("#pGo").addEventListener("click", async () => {
+    const why = (body.querySelector("[name=pWhy]:checked") || {}).value || "";
+    const more = $("#pMore").value.trim();
+    const reason = [why, more].filter(Boolean).join(" – ");
+    if (!reason) return toast("Write why you are passing it on.");
+    $("#pGo").disabled = true;
+    try {
+      const r = await api(`/api/bills/${b.id}/pass`, { method: "POST",
+        body: { to_user: body.querySelector("[name=pTo]:checked").value, reason } });
+      closeModal(); toast(`${r.moved} bill(s) passed to ${r.to}.`); loadBills();
+    } catch (e) { fail(e); $("#pGo").disabled = false; }
+  });
+}
+
 /* ============================================================ scoreboard */
 
 async function loadScore() {
@@ -520,6 +561,7 @@ async function loadScore() {
       <div class="big">${x.count} <small>entries · ${rs(x.amount)}</small></div>
       <div class="bar"><i style="width:${(x.count / max[k]) * 100}%"></i></div>
       <div class="line">Follow-ups: <b>${x.followups}</b></div>
+      <div class="line">Passed on to others: <b>${x.passed_on}</b> · Taken over: <b>${x.taken_over}</b></div>
       <div class="line">Still open with them: <b>${x.open_count}</b> bills · <b>${rs(x.open_amount)}</b></div>
       <div class="line ${x.overdue_60 ? "bad" : ""}">60+ days overdue: <b>${x.overdue_60}</b></div>
       <div class="line ${x.flagged ? "bad" : ""}">Flagged entries: <b>${x.flagged}</b></div>

@@ -590,3 +590,70 @@ def proof_reuse(conn, file_hash):
     return (f"This same proof file was already uploaded by {u['name']} for {u['party']} "
             f"({money(u['amount'])} {WORD[u['kind']]} on {u['paid_on']}, bill {u['ref_no']}). "
             f"One payment proof cannot be used for two payments.")
+
+
+# ---------------------------------------------------------------- passing work on
+
+def party_know_how(conn, party_key):
+    """Who has dealt with this party before, in any firm, either way round:
+    entries marked and follow-ups logged.  -> {user_id: count}"""
+    seen = defaultdict(int)
+    for r in conn.execute(
+            "SELECT e.user_id, COUNT(*) n FROM entries e JOIN bills b ON b.id = e.bill_id "
+            "WHERE b.party_key = ? AND e.deleted_at = '' GROUP BY e.user_id", (party_key,)):
+        seen[r["user_id"]] += r["n"]
+    for r in conn.execute(
+            "SELECT n.user_id, COUNT(*) n FROM notes n JOIN bills b ON b.id = n.bill_id "
+            "WHERE b.party_key = ? GROUP BY n.user_id", (party_key,)):
+        seen[r["user_id"]] += r["n"]
+    return dict(seen)
+
+
+def pass_on(conn, bill_id, to_user, reason, user):
+    """Hand every open bill of this party (same firm, same side) to someone
+    else.  to_user 'auto' picks whoever knows the party best, else whoever is
+    least busy.  -> (name, bills moved)"""
+    bill = conn.execute("SELECT * FROM bills WHERE id = ?", (bill_id,)).fetchone()
+    if not bill:
+        raise UploadRefused("No such bill.")
+    if bill["cleared_at"]:
+        raise UploadRefused("This bill is already settled in Tally.")
+    if user["role"] != "admin" and bill["assigned_to"] != user["id"]:
+        raise UploadRefused("Only the person this party is given to, or an admin, can pass it on.")
+    reason = " ".join((reason or "").split())[:300]
+    if not reason:
+        raise UploadRefused("Say why you are passing it on, so the next person knows.")
+    current = bill["assigned_to"]
+    people = [p["id"] for p in workers(conn) if p["id"] != current]
+    if to_user == "auto":
+        if not people:
+            raise UploadRefused("There is nobody else to pass it to.")
+        know = party_know_how(conn, bill["party_key"])
+        load = _open_load(conn, bill["kind"], people)
+        to_user = max(people, key=lambda p: (know.get(p, 0), -load[p][0], -load[p][1]))
+    try:
+        to_user = int(to_user)
+    except (TypeError, ValueError):
+        raise UploadRefused("Pick who to pass it to.")
+    if to_user == current:
+        raise UploadRefused("It is already with that person.")
+    target = conn.execute("SELECT * FROM users WHERE id = ? AND active = 1", (to_user,)).fetchone()
+    if not target:
+        raise UploadRefused("That person is not active.")
+
+    conn.execute("INSERT INTO party_owners (firm_id, kind, party_key, user_id) VALUES (?,?,?,?) "
+                 "ON CONFLICT(firm_id, kind, party_key) DO UPDATE SET user_id = excluded.user_id",
+                 (bill["firm_id"], bill["kind"], bill["party_key"], to_user))
+    moved = conn.execute("UPDATE bills SET assigned_to = ? WHERE firm_id = ? AND kind = ? "
+                         "AND party_key = ? AND cleared_at = ''",
+                         (to_user, bill["firm_id"], bill["kind"], bill["party_key"])).rowcount
+    conn.execute(
+        "INSERT INTO handovers (firm_id, kind, party_key, party, bill_id, from_user, to_user, "
+        "by_user, reason, bills, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (bill["firm_id"], bill["kind"], bill["party_key"], bill["party"], bill_id, current,
+         to_user, user["id"], reason, moved, now()))
+    who = "" if current == user["id"] else " (by admin)"
+    log(conn, user["id"], "pass_on",
+        f"{bill['party']} ({bill['kind']}) passed to {target['name']}{who}: {reason} "
+        f"- {moved} bill(s)", bill_id)
+    return target["name"], moved

@@ -154,6 +154,23 @@ CREATE TABLE IF NOT EXISTS proofs (
 );
 CREATE INDEX IF NOT EXISTS idx_proofs_hash ON proofs(file_hash);
 
+-- A party handed from one person to another, and why.
+CREATE TABLE IF NOT EXISTS handovers (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    firm_id    INTEGER NOT NULL REFERENCES firms(id),
+    kind       TEXT NOT NULL,
+    party_key  TEXT NOT NULL,
+    party      TEXT NOT NULL,
+    bill_id    INTEGER REFERENCES bills(id),
+    from_user  INTEGER REFERENCES users(id),   -- who had it
+    to_user    INTEGER NOT NULL REFERENCES users(id),
+    by_user    INTEGER NOT NULL REFERENCES users(id),   -- who pressed the button
+    reason     TEXT NOT NULL,
+    bills      INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_handovers_party ON handovers(firm_id, kind, party_key);
+
 CREATE TABLE IF NOT EXISTS activity (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id    INTEGER REFERENCES users(id),

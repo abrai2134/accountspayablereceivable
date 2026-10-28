@@ -252,6 +252,56 @@ class AccountsDeskTest(unittest.TestCase):
                                 "cleared_at = ''", (sneha,)).fetchone()[0]
         self.assertEqual(left, 0)
 
+    def test_pass_on(self):
+        admin = self.client("abrar", "adminpass1")
+        r = self.upload(admin, "WWAS_RECEIVABLE_20.10.26.xls", tally_file(
+            "WELL WORTH AIR SYSTEMS", "Bills Receivable",
+            [("2026-08-10", "369/AS", "MK", 82000), ("2026-08-25", "418/AS", "MK", 135500),
+             ("2026-09-01", "500/AS", "HRISAAR JEWELS", 21480)]))
+        self.assertTrue(r["ok"], r)
+        mk, _ = self.bill("369/AS")
+        conn = get_db()
+        users = {u["id"]: u["username"] for u in conn.execute("SELECT * FROM users")}
+        conn.close()
+        owner = users[mk["assigned_to"]]
+        stranger = next(u for u in ("ravi", "imran") if u != owner)
+        c_owner, c_stranger = self.client(owner), self.client(stranger)
+
+        # someone else cannot take it away, and a reason is needed
+        r = c_stranger.post(f"/api/bills/{mk['id']}/pass", headers=H,
+                            json={"to_user": "auto", "reason": "mine now"})
+        self.assertEqual(r.status_code, 400)
+        r = c_owner.post(f"/api/bills/{mk['id']}/pass", headers=H, json={"to_user": "auto"})
+        self.assertEqual(r.status_code, 400)
+
+        # the owner passes it on: both MK bills move together
+        target = next(i for i, u in users.items() if u == stranger)
+        r = c_owner.post(f"/api/bills/{mk['id']}/pass", headers=H,
+                         json={"to_user": target, "reason": "Not able to get the payment"})
+        self.assertEqual(r.status_code, 200, r.get_json())
+        self.assertEqual(r.get_json()["moved"], 2)
+        self.assertEqual(self.bill("418/AS")[0]["assigned_to"], target)
+
+        # the new person sees who passed it and why
+        listed = c_stranger.get("/api/bills?kind=receivable&assigned=me&q=MK").get_json()["bills"]
+        self.assertTrue(listed and listed[0]["passed_from"].endswith("Not able to get the payment"))
+        detail = c_stranger.get(f"/api/bills/{mk['id']}").get_json()
+        self.assertEqual(detail["handovers"][0]["reason"], "Not able to get the payment")
+
+        # the next MK bill in a later file goes to the new person
+        r = self.upload(admin, "WWAS_RECEIVABLE_22.10.26.xls", tally_file(
+            "WELL WORTH AIR SYSTEMS", "Bills Receivable",
+            [("2026-08-10", "369/AS", "MK", 82000), ("2026-08-25", "418/AS", "MK", 135500),
+             ("2026-09-01", "500/AS", "HRISAAR JEWELS", 21480),
+             ("2026-10-21", "655/AS", "MK", 32000)]))
+        self.assertEqual(self.bill("655/AS")[0]["assigned_to"], target)
+
+        # the scoreboard shows it both ways
+        sc = {p["name"].lower(): p for p in
+              admin.get("/api/scoreboard?period=all").get_json()["people"]}
+        self.assertEqual(sc[owner]["receivable"]["passed_on"], 1)
+        self.assertEqual(sc[stranger]["receivable"]["taken_over"], 1)
+
     def test_requests_need_header_and_login(self):
         c = self.app.test_client()
         self.assertEqual(c.get("/api/bills").status_code, 401)

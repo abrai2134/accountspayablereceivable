@@ -515,7 +515,10 @@ def bills_query(conn, args, uid):
     elif status != "all":
         where.append("b.cleared_at = ''")
     sql = ("SELECT b.*, f.code AS firm, u.name AS assigned_name, "
-           "(SELECT COUNT(*) FROM alerts a WHERE a.bill_id = b.id AND a.resolved_at = '') AS alerts "
+           "(SELECT COUNT(*) FROM alerts a WHERE a.bill_id = b.id AND a.resolved_at = '') AS alerts, "
+           "(SELECT fu.name || '|' || h.reason FROM handovers h JOIN users fu ON fu.id = h.from_user "
+           " WHERE h.firm_id = b.firm_id AND h.kind = b.kind AND h.party_key = b.party_key "
+           " AND h.to_user = b.assigned_to ORDER BY h.id DESC LIMIT 1) AS passed_from "
            "FROM bills b JOIN firms f ON f.id = b.firm_id LEFT JOIN users u ON u.id = b.assigned_to")
     if where:
         sql += " WHERE " + " AND ".join(where)
@@ -573,6 +576,13 @@ def read_bill(bid):
     out["history"] = rows(conn.execute(
         "SELECT a.*, u.name AS by_name FROM activity a LEFT JOIN users u ON u.id = a.user_id "
         "WHERE a.bill_id = ? ORDER BY a.id DESC LIMIT 50", (bid,)))
+    know = logic.party_know_how(conn, bill["party_key"])
+    out["know_how"] = know
+    out["handovers"] = rows(conn.execute(
+        "SELECT h.*, f.name AS from_name, t.name AS to_name, u.name AS by_name FROM handovers h "
+        "LEFT JOIN users f ON f.id = h.from_user JOIN users t ON t.id = h.to_user "
+        "JOIN users u ON u.id = h.by_user WHERE h.firm_id = ? AND h.kind = ? AND h.party_key = ? "
+        "ORDER BY h.id DESC", (bill["firm_id"], bill["kind"], bill["party_key"])))
     out["same_party_open"] = conn.execute(
         "SELECT COUNT(*) FROM bills WHERE firm_id = ? AND kind = ? AND party_key = ? AND "
         "cleared_at = ''", (bill["firm_id"], bill["kind"], bill["party_key"])).fetchone()[0]
@@ -598,6 +608,22 @@ def add_note(bid):
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+@app.post("/api/bills/<int:bid>/pass")
+def pass_bill(bid):
+    d = body()
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        name, moved = logic.pass_on(conn, bid, d.get("to_user"), d.get("reason"), request.user)
+        conn.commit()
+    except logic.UploadRefused as exc:
+        conn.rollback()
+        return {"error": str(exc)}, 400
+    finally:
+        conn.close()
+    return {"ok": True, "to": name, "moved": moved}
 
 
 @app.post("/api/bills/<int:bid>/reassign")
@@ -923,7 +949,8 @@ def scoreboard():
                         "takes_work": u["takes_work"],
                         **{k: {"count": 0, "bills": 0, "amount": 0.0, "flagged": 0,
                                "open_count": 0, "open_amount": 0.0, "overdue_60": 0,
-                               "followups": 0, "unclaimed": 0} for k in KINDS}}
+                               "followups": 0, "unclaimed": 0, "passed_on": 0,
+                               "taken_over": 0} for k in KINDS}}
               for u in conn.execute("SELECT * FROM users")}
     fsql, fparams = ("AND b.firm_id = ?", [firm]) if firm else ("", [])
 
@@ -940,6 +967,14 @@ def scoreboard():
             f"WHERE substr(n.created_at, 1, 10) BETWEEN ? AND ? {fsql} GROUP BY n.user_id, b.kind",
             [start, end] + fparams):
         people[r["user_id"]][r["kind"]]["followups"] = r["n"]
+
+    for r in conn.execute(
+            f"SELECT b.from_user, b.to_user, b.kind, b.by_user FROM handovers b "
+            f"WHERE substr(b.created_at, 1, 10) BETWEEN ? AND ? {fsql}", [start, end] + fparams):
+        if r["from_user"] in people and r["by_user"] == r["from_user"]:
+            people[r["from_user"]][r["kind"]]["passed_on"] += 1
+        if r["to_user"] in people:
+            people[r["to_user"]][r["kind"]]["taken_over"] += 1
 
     state = logic.bill_state(conn)
     for b in conn.execute(f"SELECT b.* FROM bills b WHERE b.assigned_to IS NOT NULL {fsql}",

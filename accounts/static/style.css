@@ -218,3 +218,10 @@ body.admin .admin-only { display: block; }
 .paste-zone.over { border-color: var(--brand-2); background: var(--green-bg); }
 .paste-zone.has { border-style: solid; border-color: var(--brand-2); }
 .proof-name { font-size: 12.5px; color: var(--green); font-weight: 600; margin: -2px 0 8px; }
+.pass-opt { align-items: flex-start; padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px;
+            margin-bottom: 6px; cursor: pointer; }
+.pass-opt input { margin-top: 2px; }
+.pass-opt small { display: block; font-weight: 400; color: var(--muted); font-size: 12px; }
+.pass-opt:has(input:checked) { border-color: var(--brand-2); background: var(--green-bg); }
+.party-head small.passed { display: block; color: var(--blue); }
+textarea { resize: vertical; }
